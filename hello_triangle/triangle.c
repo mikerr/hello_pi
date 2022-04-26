@@ -591,13 +591,6 @@ previous_bo = bo;
 previous_fb = fb;
 }
 
-static void draw (float progress) {
-
-glClearColor (1.0f-progress, progress, 0.0, 1.0);
-glClear (GL_COLOR_BUFFER_BIT);
-swap_buffers ();
-}
-
 static int match_config_to_visual(EGLDisplay egl_display, EGLint visual_id, EGLConfig *configs, int count) {
 
 EGLint id;
@@ -653,7 +646,6 @@ eglMakeCurrent (display, egl_surface, egl_surface, context);
       update_model(state);
       redraw_scene(state);
    }
-for (i = 0; i < 600; i++) draw (i / 600.0f);
 	
 drmModeSetCrtc (device, crtc->crtc_id, crtc->buffer_id, crtc->x, crtc->y, &connector_id, 1, &crtc->mode);
 drmModeFreeCrtc (crtc);
