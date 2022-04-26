@@ -210,9 +210,6 @@ static void init_ogl(CUBE_STATE_T *state)
    state->surface = egl_surface;
    state->context = context;
 
-   state->screen_width = 640;
-   state->screen_height = 480;
-
    // Set background color and clear buffers
    glClearColor(0.15f, 0.25f, 0.35f, 1.0f);
 
@@ -640,6 +637,8 @@ eglMakeCurrent (display, egl_surface, egl_surface, context);
    // Clear application state
    memset( state, 0, sizeof( *state ) );
       
+   state->screen_width = mode_info.hdisplay;
+   state->screen_height = mode_info.vdisplay;
    // Start OGLES
    init_ogl(state);
 
