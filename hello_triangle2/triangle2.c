@@ -512,6 +512,9 @@ context = eglCreateContext (display, configs[config_index], EGL_NO_CONTEXT, cont
 egl_surface = eglCreateWindowSurface (display, configs[config_index], gbm_surface, NULL);
 free(configs);
 eglMakeCurrent (display, egl_surface, egl_surface, context);
+
+state->screen_width = mode_info.hdisplay;
+state->screen_height = mode_info.vdisplay;
 }
 	
 int end_gl () {
@@ -542,8 +545,6 @@ int main ()
    // Start OGLES
    init_gl();
    init_ogl();
-   state->screen_width = 1280;
-   state->screen_height = 1080;
 
    init_shaders(state);
    cx = state->screen_width/2;
