@@ -28,6 +28,19 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // OpenGL|ES 2 demo using shader to compute mandelbrot/julia sets
 // Thanks to Peter de Rivas for original Python code
 
+
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <gbm.h>
+#include <EGL/egl.h>
+#include <GL/gl.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+
+#define EXIT(msg) { fputs (msg, stderr); exit (EXIT_FAILURE); }
+
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -36,13 +49,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assert.h>
 #include <unistd.h>
 
-#include "bcm_host.h"
-
 #include "GLES2/gl2.h"
 #include "EGL/egl.h"
 #include "EGL/eglext.h"
-
-#include "revision.h"
 
 typedef struct
 {
@@ -88,110 +97,7 @@ static void showprogramlog(GLint shader)
    printf("%d:program:\n%s\n", shader, log);
 }
     
-/***********************************************************
- * Name: init_ogl
- *
- * Arguments:
- *       CUBE_STATE_T *state - holds OGLES model info
- *
- * Description: Sets the display, OpenGL|ES context and screen stuff
- *
- * Returns: void
- *
- ***********************************************************/
-static void init_ogl(CUBE_STATE_T *state)
-{
-   int32_t success = 0;
-   EGLBoolean result;
-   EGLint num_config;
-
-   static EGL_DISPMANX_WINDOW_T nativewindow;
-
-   DISPMANX_ELEMENT_HANDLE_T dispman_element;
-   DISPMANX_DISPLAY_HANDLE_T dispman_display;
-   DISPMANX_UPDATE_HANDLE_T dispman_update;
-   VC_RECT_T dst_rect;
-   VC_RECT_T src_rect;
-
-   static const EGLint attribute_list[] =
-   {
-      EGL_RED_SIZE, 8,
-      EGL_GREEN_SIZE, 8,
-      EGL_BLUE_SIZE, 8,
-      EGL_ALPHA_SIZE, 8,
-      EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-      EGL_NONE
-   };
-   
-   static const EGLint context_attributes[] = 
-   {
-      EGL_CONTEXT_CLIENT_VERSION, 2,
-      EGL_NONE
-   };
-   EGLConfig config;
-
-   // get an EGL display connection
-   state->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-   assert(state->display!=EGL_NO_DISPLAY);
-   check();
-
-   // initialize the EGL display connection
-   result = eglInitialize(state->display, NULL, NULL);
-   assert(EGL_FALSE != result);
-   check();
-
-   // get an appropriate EGL frame buffer configuration
-   result = eglChooseConfig(state->display, attribute_list, &config, 1, &num_config);
-   assert(EGL_FALSE != result);
-   check();
-
-   // get an appropriate EGL frame buffer configuration
-   result = eglBindAPI(EGL_OPENGL_ES_API);
-   assert(EGL_FALSE != result);
-   check();
-
-   // create an EGL rendering context
-   state->context = eglCreateContext(state->display, config, EGL_NO_CONTEXT, context_attributes);
-   assert(state->context!=EGL_NO_CONTEXT);
-   check();
-
-   // create an EGL window surface
-   success = graphics_get_display_size(0 /* LCD */, &state->screen_width, &state->screen_height);
-   assert( success >= 0 );
-
-   dst_rect.x = 0;
-   dst_rect.y = 0;
-   dst_rect.width = state->screen_width;
-   dst_rect.height = state->screen_height;
-      
-   src_rect.x = 0;
-   src_rect.y = 0;
-   src_rect.width = state->screen_width << 16;
-   src_rect.height = state->screen_height << 16;        
-
-   dispman_display = vc_dispmanx_display_open( 0 /* LCD */);
-   dispman_update = vc_dispmanx_update_start( 0 );
-         
-   dispman_element = vc_dispmanx_element_add ( dispman_update, dispman_display,
-      0/*layer*/, &dst_rect, 0/*src*/,
-      &src_rect, DISPMANX_PROTECTION_NONE, 0 /*alpha*/, 0/*clamp*/, 0/*transform*/);
-      
-   nativewindow.element = dispman_element;
-   nativewindow.width = state->screen_width;
-   nativewindow.height = state->screen_height;
-   vc_dispmanx_update_submit_sync( dispman_update );
-      
-   check();
-
-   state->surface = eglCreateWindowSurface( state->display, config, &nativewindow, NULL );
-   assert(state->surface != EGL_NO_SURFACE);
-   check();
-
-   // connect the context to the surface
-   result = eglMakeCurrent(state->display, state->surface, state->surface, state->context);
-   assert(EGL_FALSE != result);
-   check();
-
+int init_ogl(){
    // Set background color and clear buffers
    glClearColor(0.15f, 0.25f, 0.35f, 1.0f);
    glClear( GL_COLOR_BUFFER_BIT );
@@ -486,23 +392,159 @@ _exit:
  
 //==============================================================================
 
+// global variables declarations
+
+static int device;
+static drmModeRes *resources;
+static drmModeConnector *connector;
+static uint32_t connector_id;
+static drmModeEncoder *encoder;
+static drmModeModeInfo mode_info;
+static drmModeCrtc *crtc;
+static struct gbm_device *gbm_device;
+static EGLDisplay display;
+static EGLContext context;
+static struct gbm_surface *gbm_surface;
+static EGLSurface egl_surface;
+       EGLConfig config;
+       EGLint num_config;
+       EGLint count=0;
+       EGLConfig *configs;
+       int config_index;
+       int i;
+       
+static struct gbm_bo *previous_bo = NULL;
+static uint32_t previous_fb;       
+
+static EGLint attributes[] = {
+		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+		EGL_RED_SIZE, 8,
+		EGL_GREEN_SIZE, 8,
+		EGL_BLUE_SIZE, 8,
+		EGL_ALPHA_SIZE, 0,
+		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+		EGL_NONE
+		};
+
+static const EGLint context_attribs[] = {
+		EGL_CONTEXT_CLIENT_VERSION, 2,
+		EGL_NONE
+	};
+
+struct gbm_bo *bo;	
+uint32_t handle;
+uint32_t pitch;
+int32_t fb;
+uint64_t modifier;
+
+
+static drmModeConnector *find_connector (drmModeRes *resources) {
+
+for (i=0; i<resources->count_connectors; i++) {
+  drmModeConnector *connector = drmModeGetConnector (device, resources->connectors[i]);
+  if (connector->connection == DRM_MODE_CONNECTED) {return connector;}
+  drmModeFreeConnector (connector);
+  }
+return NULL; // if no connector found
+}
+
+static drmModeEncoder *find_encoder (drmModeRes *resources, drmModeConnector *connector) {
+
+if (connector->encoder_id) {return drmModeGetEncoder (device, connector->encoder_id);}
+return NULL; // if no encoder found
+}
+
+static void swap_buffers () {
+
+eglSwapBuffers (display, egl_surface);
+bo = gbm_surface_lock_front_buffer (gbm_surface);
+handle = gbm_bo_get_handle (bo).u32;
+pitch = gbm_bo_get_stride (bo);
+drmModeAddFB (device, mode_info.hdisplay, mode_info.vdisplay, 24, 32, pitch, handle, &fb);
+drmModeSetCrtc (device, crtc->crtc_id, fb, 0, 0, &connector_id, 1, &mode_info);
+if (previous_bo) {
+  drmModeRmFB (device, previous_fb);
+  gbm_surface_release_buffer (gbm_surface, previous_bo);
+  }
+previous_bo = bo;
+previous_fb = fb;
+}
+
+static void draw (float progress) {
+
+glClearColor (1.0f-progress, progress, 0.0, 1.0);
+glClear (GL_COLOR_BUFFER_BIT);
+swap_buffers ();
+}
+
+static int match_config_to_visual(EGLDisplay egl_display, EGLint visual_id, EGLConfig *configs, int count) {
+
+EGLint id;
+for (i = 0; i < count; ++i) {
+  if (!eglGetConfigAttrib(egl_display, configs[i], EGL_NATIVE_VISUAL_ID,&id)) continue;
+  if (id == visual_id) return i;
+  }
+return -1;
+}
+
+int init_gl () {
+
+device = open ("/dev/dri/card1", O_RDWR);
+resources = drmModeGetResources (device);
+connector = find_connector (resources);
+connector_id = connector->connector_id;
+mode_info = connector->modes[0];
+encoder = find_encoder (resources, connector);
+crtc = drmModeGetCrtc (device, encoder->crtc_id);
+drmModeFreeEncoder (encoder);
+drmModeFreeConnector (connector);
+drmModeFreeResources (resources);
+gbm_device = gbm_create_device (device);
+gbm_surface = gbm_surface_create (gbm_device, mode_info.hdisplay, mode_info.vdisplay, GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT|GBM_BO_USE_RENDERING);
+display = eglGetDisplay (gbm_device);
+eglInitialize (display, NULL ,NULL);
+eglBindAPI (EGL_OPENGL_API);
+eglGetConfigs(display, NULL, 0, &count);
+configs = malloc(count * sizeof *configs);
+eglChooseConfig (display, attributes, configs, count, &num_config);
+config_index = match_config_to_visual(display,GBM_FORMAT_XRGB8888,configs,num_config);
+context = eglCreateContext (display, configs[config_index], EGL_NO_CONTEXT, context_attribs);
+egl_surface = eglCreateWindowSurface (display, configs[config_index], gbm_surface, NULL);
+free(configs);
+eglMakeCurrent (display, egl_surface, egl_surface, context);
+}
+	
+int end_gl () {
+drmModeSetCrtc (device, crtc->crtc_id, crtc->buffer_id, crtc->x, crtc->y, &connector_id, 1, &crtc->mode);
+drmModeFreeCrtc (crtc);
+if (previous_bo) {
+  drmModeRmFB (device, previous_fb);
+  gbm_surface_release_buffer (gbm_surface, previous_bo);
+  }
+eglDestroySurface (display, egl_surface);
+gbm_surface_destroy (gbm_surface);
+eglDestroyContext (display, context);
+eglTerminate (display);
+gbm_device_destroy (gbm_device);
+
+close (device);
+return 0;
+}
+
 int main ()
 {
    int terminate = 0;
    GLfloat cx, cy;
-   bcm_host_init();
-
-   if (get_processor_id() == PROCESSOR_BCM2838)
-   {
-      puts("This demo application is not available on the Pi4\n\n");
-      exit(0);
-   }
 
    // Clear application state
    memset( state, 0, sizeof( *state ) );
       
    // Start OGLES
-   init_ogl(state);
+   init_gl();
+   init_ogl();
+   state->screen_width = 1280;
+   state->screen_height = 1080;
+
    init_shaders(state);
    cx = state->screen_width/2;
    cy = state->screen_height/2;
@@ -514,7 +556,7 @@ int main ()
       b = get_mouse(state, &x, &y);
       if (b) break;
       draw_triangles(state, cx, cy, 0.003, x, y);
+      swap_buffers();
    }
    return 0;
 }
-
