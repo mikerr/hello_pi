@@ -27,22 +27,25 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // A rotating cube rendered with OpenGL|ES. Three images used as textures on the cube faces.
 
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <gbm.h>
+#include <EGL/egl.h>
+#include <GL/gl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <string.h>
 #include <math.h>
 #include <assert.h>
-#include <unistd.h>
-
-#include "bcm_host.h"
 
 #include "GLES/gl.h"
 #include "EGL/egl.h"
 #include "EGL/eglext.h"
 
 #include "cube_texture_and_coords.h"
-
-#include "revision.h"
 
 #define PATH "./"
 
@@ -53,13 +56,63 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 	
 
+static int device;
+static drmModeRes *resources;
+static drmModeConnector *connector;
+static uint32_t connector_id;
+static drmModeEncoder *encoder;
+static drmModeModeInfo mode_info;
+static drmModeCrtc *crtc;
+static struct gbm_device *gbm_device;
+static EGLDisplay display;
+static EGLContext context;
+static struct gbm_surface *gbm_surface;
+static EGLSurface egl_surface;
+       EGLConfig config;
+       EGLint num_config;
+       EGLint count=0;
+       EGLConfig *configs;
+       int config_index;
+       int i;
+       
+static struct gbm_bo *previous_bo = NULL;
+static uint32_t previous_fb;       
+static EGLint attributes[] = {
+		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+		EGL_RED_SIZE, 8,
+		EGL_GREEN_SIZE, 8,
+		EGL_BLUE_SIZE, 8,
+		EGL_ALPHA_SIZE, 0,
+		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+		EGL_NONE
+		};
+/*
+   static const EGLint attributes[] =
+   {
+      EGL_RED_SIZE, 8,
+      EGL_GREEN_SIZE, 8,
+      EGL_BLUE_SIZE, 8,
+      EGL_ALPHA_SIZE, 8,
+      EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+      EGL_NONE
+   };
+*/
+   
+static const EGLint context_attribs[] = {
+		EGL_CONTEXT_CLIENT_VERSION, 2,
+		EGL_NONE
+	};
+
+struct gbm_bo *bo;	
+uint32_t handle;
+uint32_t pitch;
+int32_t fb;
+uint64_t modifier;
 typedef struct
 {
    uint32_t screen_width;
    uint32_t screen_height;
 // OpenGL|ES objects
-   DISPMANX_DISPLAY_HANDLE_T dispman_display;
-   DISPMANX_ELEMENT_HANDLE_T dispman_element;
    EGLDisplay display;
    EGLSurface surface;
    EGLContext context;
@@ -94,6 +147,7 @@ static void exit_func(void);
 static volatile int terminate;
 static CUBE_STATE_T _state, *state=&_state;
 
+static void swap_buffers ();
 
 /***********************************************************
  * Name: init_ogl
@@ -112,12 +166,6 @@ static void init_ogl(CUBE_STATE_T *state)
    EGLBoolean result;
    EGLint num_config;
 
-   static EGL_DISPMANX_WINDOW_T nativewindow;
-
-   DISPMANX_UPDATE_HANDLE_T dispman_update;
-   VC_RECT_T dst_rect;
-   VC_RECT_T src_rect;
-
    static const EGLint attribute_list[] =
    {
       EGL_RED_SIZE, 8,
@@ -131,53 +179,39 @@ static void init_ogl(CUBE_STATE_T *state)
    EGLConfig config;
 
    // get an EGL display connection
-   state->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-   assert(state->display!=EGL_NO_DISPLAY);
+   //state->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+   //assert(state->display!=EGL_NO_DISPLAY);
 
    // initialize the EGL display connection
-   result = eglInitialize(state->display, NULL, NULL);
-   assert(EGL_FALSE != result);
+   //result = eglInitialize(state->display, NULL, NULL);
 
    // get an appropriate EGL frame buffer configuration
-   result = eglChooseConfig(state->display, attribute_list, &config, 1, &num_config);
-   assert(EGL_FALSE != result);
+   //result = eglChooseConfig(state->display, attribute_list, &config, 1, &num_config);
 
    // create an EGL rendering context
-   state->context = eglCreateContext(state->display, config, EGL_NO_CONTEXT, NULL);
-   assert(state->context!=EGL_NO_CONTEXT);
+   //state->context = eglCreateContext(state->display, config, EGL_NO_CONTEXT, NULL);
 
    // create an EGL window surface
-   success = graphics_get_display_size(0 /* LCD */, &state->screen_width, &state->screen_height);
-   assert( success >= 0 );
+   //success = graphics_get_display_size(0 /* LCD */, &state->screen_width, &state->screen_height);
 
-   dst_rect.x = 0;
-   dst_rect.y = 0;
-   dst_rect.width = state->screen_width;
-   dst_rect.height = state->screen_height;
-      
-   src_rect.x = 0;
-   src_rect.y = 0;
-   src_rect.width = state->screen_width << 16;
-   src_rect.height = state->screen_height << 16;        
-
-   state->dispman_display = vc_dispmanx_display_open( 0 /* LCD */);
-   dispman_update = vc_dispmanx_update_start( 0 );
+   //state->dispman_display = vc_dispmanx_display_open( 0 /* LCD */);
+   //dispman_update = vc_dispmanx_update_start( 0 );
          
-   state->dispman_element = vc_dispmanx_element_add ( dispman_update, state->dispman_display,
-      0/*layer*/, &dst_rect, 0/*src*/,
-      &src_rect, DISPMANX_PROTECTION_NONE, 0 /*alpha*/, 0/*clamp*/, 0/*transform*/);
+   //state->dispman_element = vc_dispmanx_element_add ( dispman_update, state->dispman_display,
+    //  0/*layer*/, &dst_rect, 0/*src*/,
+     // &src_rect, DISPMANX_PROTECTION_NONE, 0 /*alpha*/, 0/*clamp*/, 0/*transform*/);
       
-   nativewindow.element = state->dispman_element;
-   nativewindow.width = state->screen_width;
-   nativewindow.height = state->screen_height;
-   vc_dispmanx_update_submit_sync( dispman_update );
-      
-   state->surface = eglCreateWindowSurface( state->display, config, &nativewindow, NULL );
-   assert(state->surface != EGL_NO_SURFACE);
+   //state->surface = eglCreateWindowSurface( state->display, config, &nativewindow, NULL );
 
    // connect the context to the surface
-   result = eglMakeCurrent(state->display, state->surface, state->surface, state->context);
-   assert(EGL_FALSE != result);
+   //result = eglMakeCurrent(state->display, state->surface, state->surface, state->context);
+
+   state->display = display;
+   state->surface = egl_surface;
+   state->context = context;
+
+   state->screen_width = 640;
+   state->screen_height = 480;
 
    // Set background color and clear buffers
    glClearColor(0.15f, 0.25f, 0.35f, 1.0f);
@@ -340,7 +374,10 @@ static GLfloat inc_and_clip_distance(GLfloat distance, GLfloat distance_inc)
  *
  ***********************************************************/
 static void redraw_scene(CUBE_STATE_T *state)
-{
+{ 
+	static float progress;
+glClearColor (1.0f-progress, progress, 0.0, 1.0);
+progress += 0.001f;
    // Start with a clear screen
    glClear( GL_COLOR_BUFFER_BIT );
 
@@ -376,6 +413,7 @@ static void redraw_scene(CUBE_STATE_T *state)
    glDrawArrays( GL_TRIANGLE_STRIP, 20, 4);
 
    eglSwapBuffers(state->display, state->surface);
+   swap_buffers();
 }
 
 /***********************************************************
@@ -495,7 +533,6 @@ static void load_tex_images(CUBE_STATE_T *state)
 static void exit_func(void)
 // Function to be passed to atexit().
 {
-   DISPMANX_UPDATE_HANDLE_T dispman_update;
    int s;
    // clear screen
    glClear( GL_COLOR_BUFFER_BIT );
@@ -503,13 +540,6 @@ static void exit_func(void)
 
    glDeleteTextures(6, state->tex);
    eglDestroySurface( state->display, state->surface );
-
-   dispman_update = vc_dispmanx_update_start( 0 );
-   s = vc_dispmanx_element_remove(dispman_update, state->dispman_element);
-   assert(s == 0);
-   vc_dispmanx_update_submit_sync( dispman_update );
-   s = vc_dispmanx_display_close(state->dispman_display);
-   assert (s == 0);
 
    // Release OpenGL resources
    eglMakeCurrent( state->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT );
@@ -526,9 +556,123 @@ static void exit_func(void)
 
 //==============================================================================
 
-int main ()
+#define EXIT(msg) { fputs (msg, stderr); exit (EXIT_FAILURE); }
+
+// global variables declarations
+
+
+
+static drmModeConnector *find_connector (drmModeRes *resources) {
+
+for (i=0; i<resources->count_connectors; i++) {
+  drmModeConnector *connector = drmModeGetConnector (device, resources->connectors[i]);
+  if (connector->connection == DRM_MODE_CONNECTED) {return connector;}
+  drmModeFreeConnector (connector);
+  }
+return NULL; // if no connector found
+}
+
+static drmModeEncoder *find_encoder (drmModeRes *resources, drmModeConnector *connector) {
+
+if (connector->encoder_id) {return drmModeGetEncoder (device, connector->encoder_id);}
+return NULL; // if no encoder found
+}
+
+static void swap_buffers () {
+
+//eglSwapBuffers (display, egl_surface);
+bo = gbm_surface_lock_front_buffer (gbm_surface);
+handle = gbm_bo_get_handle (bo).u32;
+pitch = gbm_bo_get_stride (bo);
+drmModeAddFB (device, mode_info.hdisplay, mode_info.vdisplay, 24, 32, pitch, handle, &fb);
+drmModeSetCrtc (device, crtc->crtc_id, fb, 0, 0, &connector_id, 1, &mode_info);
+if (previous_bo) {
+  drmModeRmFB (device, previous_fb);
+  gbm_surface_release_buffer (gbm_surface, previous_bo);
+  }
+previous_bo = bo;
+previous_fb = fb;
+}
+
+static void draw (float progress) {
+
+glClearColor (1.0f-progress, progress, 0.0, 1.0);
+glClear (GL_COLOR_BUFFER_BIT);
+swap_buffers ();
+}
+
+static int match_config_to_visual(EGLDisplay egl_display, EGLint visual_id, EGLConfig *configs, int count) {
+
+EGLint id;
+for (i = 0; i < count; ++i) {
+  if (!eglGetConfigAttrib(egl_display, configs[i], EGL_NATIVE_VISUAL_ID,&id)) continue;
+  if (id == visual_id) return i;
+  }
+return -1;
+}
+
+int main () {
+
+device = open ("/dev/dri/card1", O_RDWR);
+resources = drmModeGetResources (device);
+connector = find_connector (resources);
+connector_id = connector->connector_id;
+mode_info = connector->modes[0];
+encoder = find_encoder (resources, connector);
+crtc = drmModeGetCrtc (device, encoder->crtc_id);
+drmModeFreeEncoder (encoder);
+drmModeFreeConnector (connector);
+drmModeFreeResources (resources);
+gbm_device = gbm_create_device (device);
+gbm_surface = gbm_surface_create (gbm_device, mode_info.hdisplay, mode_info.vdisplay, GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT|GBM_BO_USE_RENDERING);
+display = eglGetDisplay (gbm_device);
+eglInitialize (display, NULL ,NULL);
+eglBindAPI (EGL_OPENGL_API);
+eglGetConfigs(display, NULL, 0, &count);
+configs = malloc(count * sizeof *configs);
+eglChooseConfig (display, attributes, configs, count, &num_config);
+config_index = match_config_to_visual(display,GBM_FORMAT_XRGB8888,configs,num_config);
+context = eglCreateContext (display, configs[config_index], EGL_NO_CONTEXT, context_attribs);
+egl_surface = eglCreateWindowSurface (display, configs[config_index], gbm_surface, NULL);
+free(configs);
+eglMakeCurrent (display, egl_surface, egl_surface, context);
+
+   // Clear application state
+   memset( state, 0, sizeof( *state ) );
+      
+   // Start OGLES
+   init_ogl(state);
+
+   // Setup the model world
+   init_model_proj(state);
+
+   // initialise the OGLES texture(s)
+   init_textures(state);
+
+   while (!terminate)
+   {
+      update_model(state);
+      redraw_scene(state);
+   }
+for (i = 0; i < 600; i++) draw (i / 600.0f);
+	
+drmModeSetCrtc (device, crtc->crtc_id, crtc->buffer_id, crtc->x, crtc->y, &connector_id, 1, &crtc->mode);
+drmModeFreeCrtc (crtc);
+if (previous_bo) {
+  drmModeRmFB (device, previous_fb);
+  gbm_surface_release_buffer (gbm_surface, previous_bo);
+  }
+eglDestroySurface (display, egl_surface);
+gbm_surface_destroy (gbm_surface);
+eglDestroyContext (display, context);
+eglTerminate (display);
+gbm_device_destroy (gbm_device);
+
+close (device);
+return 0;
+}
+int old_main ()
 {
-   bcm_host_init();
 
    // Clear application state
    memset( state, 0, sizeof( *state ) );
