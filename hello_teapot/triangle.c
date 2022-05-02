@@ -342,7 +342,8 @@ static void init_textures(CUBE_STATE_T *state)
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
    /* Create EGL Image */
-   eglImage = eglCreateImageKHR(
+   //eglImage = eglCreateImageKHR(
+   eglImage = eglCreateImage(
                 state->display,
                 state->context,
                 EGL_GL_TEXTURE_2D_KHR,
@@ -378,7 +379,8 @@ static void exit_func(void)
 	
    if (eglImage != 0)
    {
-      if (!eglDestroyImageKHR(state->display, (EGLImageKHR) eglImage))
+      //if (!eglDestroyImageKHR(state->display, (EGLImageKHR) eglImage))
+      if (!eglDestroyImage(state->display, eglImage))
          printf("eglDestroyImageKHR failed.");
    }
 

@@ -1,6 +1,6 @@
 OBJS=triangle.o video.o models.o
 BIN=hello_teapot.bin
-LDFLAGS+= -ldrm -lgbm -lEGL -lGL -lm -lpthread -L/opt/vc/lib/ -lbcm_host -lvcos -lvchiq_arm -L/opt/vc/src/hello_pi/libs/ilclient -lilclient
+LDFLAGS+= -ldrm -lgbm -lEGL -lGL -lm -lpthread -L/opt/vc/lib/ -lbcm_host -lvcos -lvchiq_arm -L/opt/vc/src/hello_pi/libs/ilclient -lilclient -lvcilcs
 INCLUDES+= -I/usr/include/libdrm -I/opt/vc/include -I/opt/vc/src/hello_pi/libs/ilclient
 
 all: $(BIN) $(LIB)
