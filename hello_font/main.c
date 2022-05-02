@@ -1,31 +1,4 @@
-/*
-Copyright (c) 2012, Broadcom Europe Ltd
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-    * Redistributions of source code must retain the above copyright
-      notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-      notice, this list of conditions and the following disclaimer in the
-      documentation and/or other materials provided with the distribution.
-    * Neither the name of the copyright holder nor the
-      names of its contributors may be used to endorse or promote products
-      derived from this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
-
-// Test app for VG font library.
+// Test app for FTGL font library.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,114 +6,177 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assert.h>
 #include <unistd.h>
 
-#include "bcm_host.h"
-#include "vgfont.h"
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <gbm.h>
+#include <EGL/egl.h>
+#include <GL/gl.h>
+#include <fcntl.h>
 
-#include "revision.h"
+#include <FTGL/ftgl.h>
 
-static const char *strnchr(const char *str, size_t len, char c)
-{
-   const char *e = str + len;
-   do {
-      if (*str == c) {
-         return str;
-      }
-   } while (++str < e);
-   return NULL;
+// using libftgl-dev and libfreetype6-dev
+
+static int device;
+static drmModeRes *resources;
+static drmModeConnector *connector;
+static uint32_t connector_id;
+static drmModeEncoder *encoder;
+static drmModeModeInfo mode_info;
+static drmModeCrtc *crtc;
+static struct gbm_device *gbm_device;
+static EGLDisplay display;
+static EGLContext context;
+static struct gbm_surface *gbm_surface;
+static EGLSurface egl_surface;
+       EGLConfig config;
+       EGLint num_config;
+       EGLint count=0;
+       EGLConfig *configs;
+       int config_index;
+       int i;
+       
+static struct gbm_bo *previous_bo = NULL;
+static uint32_t previous_fb;       
+
+static EGLint attributes[] = {
+		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+		EGL_RED_SIZE, 8,
+		EGL_GREEN_SIZE, 8,
+		EGL_BLUE_SIZE, 8,
+		EGL_ALPHA_SIZE, 0,
+		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+		EGL_NONE
+		};
+
+static const EGLint context_attribs[] = {
+		EGL_CONTEXT_CLIENT_VERSION, 2,
+		EGL_NONE
+	};
+
+struct gbm_bo *bo;	
+uint32_t handle;
+uint32_t pitch;
+int32_t fb;
+uint64_t modifier;
+
+
+static drmModeConnector *find_connector (drmModeRes *resources) {
+
+  for (i=0; i<resources->count_connectors; i++) {
+    drmModeConnector *connector = drmModeGetConnector (device, resources->connectors[i]);
+    if (connector->connection == DRM_MODE_CONNECTED) {return connector;}
+    drmModeFreeConnector (connector);
+  }
+return NULL; // if no connector found
 }
 
-int32_t render_subtitle(GRAPHICS_RESOURCE_HANDLE img, const char *text, const int skip, const uint32_t text_size, const uint32_t y_offset)
-{
-   uint32_t text_length = strlen(text)-skip;
-   uint32_t width=0, height=0;
-   const char *split = text;
-   int32_t s=0;
-   int len = 0; // length of pre-subtitle
-   uint32_t img_w, img_h;
+static drmModeEncoder *find_encoder (drmModeRes *resources, drmModeConnector *connector) {
 
-   graphics_get_resource_size(img, &img_w, &img_h);
-
-   if (text_length==0)
-      return 0;
-   while (split[0]) {
-      s = graphics_resource_text_dimensions_ext(img, split, text_length-(split-text), &width, &height, text_size);
-      if (s != 0) return s;
-      if (width > img_w) {
-         const char *space = strnchr(split, text_length-(split-text), ' ');
-         if (!space) {
-            len = split+1-text;
-            split = split+1;
-         } else {
-            len = space-text;
-            split = space+1;
-         }
-      } else {
-         break;
-      }
-   }
-   // split now points to last line of text. split-text = length of initial text. text_length-(split-text) is length of last line
-   if (width) {
-      s = graphics_resource_render_text_ext(img, (img_w - width)>>1, y_offset-height,
-                                     GRAPHICS_RESOURCE_WIDTH,
-                                     GRAPHICS_RESOURCE_HEIGHT,
-                                     GRAPHICS_RGBA32(0xff,0xff,0xff,0xff), /* fg */
-                                     GRAPHICS_RGBA32(0,0,0,0x80), /* bg */
-                                     split, text_length-(split-text), text_size);
-      if (s!=0) return s;
-   }
-   return render_subtitle(img, text, skip+text_length-len, text_size, y_offset - height);
+  if (connector->encoder_id) {return drmModeGetEncoder (device, connector->encoder_id);}
+  return NULL; // if no encoder found
 }
 
-int main(void)
-{
-   GRAPHICS_RESOURCE_HANDLE img;
-   uint32_t width, height;
-   int LAYER=1;
-   bcm_host_init();
-   int s;
+static void swap_buffers () {
 
-   if (get_processor_id() == PROCESSOR_BCM2838)
+  eglSwapBuffers (display, egl_surface);
+  bo = gbm_surface_lock_front_buffer (gbm_surface);
+  handle = gbm_bo_get_handle (bo).u32;
+  pitch = gbm_bo_get_stride (bo);
+  drmModeAddFB (device, mode_info.hdisplay, mode_info.vdisplay, 24, 32, pitch, handle, &fb);
+  drmModeSetCrtc (device, crtc->crtc_id, fb, 0, 0, &connector_id, 1, &mode_info);
+  if (previous_bo) {
+    drmModeRmFB (device, previous_fb);
+    gbm_surface_release_buffer (gbm_surface, previous_bo);
+  }
+  previous_bo = bo;
+  previous_fb = fb;
+}
+
+static int match_config_to_visual(EGLDisplay egl_display, EGLint visual_id, EGLConfig *configs, int count) {
+
+  EGLint id;
+  for (i = 0; i < count; ++i) {
+    if (!eglGetConfigAttrib(egl_display, configs[i], EGL_NATIVE_VISUAL_ID,&id)) continue;
+    if (id == visual_id) return i;
+  }
+return -1;
+}
+
+int init_gl () {
+
+  device = open ("/dev/dri/card1", O_RDWR);
+  resources = drmModeGetResources (device);
+  connector = find_connector (resources);
+  connector_id = connector->connector_id;
+  mode_info = connector->modes[0];
+  encoder = find_encoder (resources, connector);
+  crtc = drmModeGetCrtc (device, encoder->crtc_id);
+  drmModeFreeEncoder (encoder);
+  drmModeFreeConnector (connector);
+  drmModeFreeResources (resources);
+  gbm_device = gbm_create_device (device);
+  gbm_surface = gbm_surface_create (gbm_device, mode_info.hdisplay, mode_info.vdisplay, GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT|GBM_BO_USE_RENDERING);
+  display = eglGetDisplay (gbm_device);
+  eglInitialize (display, NULL ,NULL);
+  eglBindAPI (EGL_OPENGL_API);
+  eglGetConfigs(display, NULL, 0, &count);
+  configs = malloc(count * sizeof *configs);
+  eglChooseConfig (display, attributes, configs, count, &num_config);
+  config_index = match_config_to_visual(display,GBM_FORMAT_XRGB8888,configs,num_config);
+  context = eglCreateContext (display, configs[config_index], EGL_NO_CONTEXT, context_attribs);
+  egl_surface = eglCreateWindowSurface (display, configs[config_index], gbm_surface, NULL);
+  free(configs);
+  eglMakeCurrent (display, egl_surface, egl_surface, context);
+
+//state->screen_width = mode_info.hdisplay;
+//state->screen_height = mode_info.vdisplay;
+}
+	
+int end_gl () {
+  drmModeSetCrtc (device, crtc->crtc_id, crtc->buffer_id, crtc->x, crtc->y, &connector_id, 1, &crtc->mode);
+  drmModeFreeCrtc (crtc);
+  if (previous_bo) {
+    drmModeRmFB (device, previous_fb);
+    gbm_surface_release_buffer (gbm_surface, previous_bo);
+  }
+  eglDestroySurface (display, egl_surface);
+  gbm_surface_destroy (gbm_surface);
+  eglDestroyContext (display, context);
+  eglTerminate (display);
+  gbm_device_destroy (gbm_device);
+
+  close (device);
+  return 0;
+}
+
+int main ()
+{
+      
+  // Start OGLES
+  init_gl();
+
+  /* Create a pixmap font from a TrueType file. */
+  FTGLfont *font = ftglCreatePixmapFont("Vera.ttf");
+
+  if(!font) return -1;
+
+   while (1)
    {
-      puts("This demo application is not available on the Pi4\n\n");
-      exit(0);
+	   for (int i=1;i<10;i++) {
+
+		float y = i / 5.0f;
+    		glRasterPos2f(-1.0f,1-y);
+
+		int pointsize = i;
+    		ftglSetFontFaceSize(font, pointsize * 8, pointsize * 8);
+    		ftglRenderFont(font, "The quick brown fox jumps over the lazy dog", FTGL_RENDER_ALL);
+	   }
+    swap_buffers();
    }
 
-   s = gx_graphics_init(".");
-   assert(s == 0);
-
-   s = graphics_get_display_size(0, &width, &height);
-   assert(s == 0);
-
-   s = gx_create_window(0, width, height, GRAPHICS_RESOURCE_RGBA32, &img);
-   assert(s == 0);
-
-   // transparent before display to avoid screen flash
-   graphics_resource_fill(img, 0, 0, width, height, GRAPHICS_RGBA32(0,0,0,0x00));
-
-   graphics_display_resource(img, 0, LAYER, 0, 0, GRAPHICS_RESOURCE_WIDTH, GRAPHICS_RESOURCE_HEIGHT, VC_DISPMAN_ROT0, 1);
-
-   uint32_t text_size = 10;
-   while (1) {
-      const char *text = "The quick brown fox jumps over the lazy dog";
-      uint32_t y_offset = height-60+text_size/2;
-      graphics_resource_fill(img, 0, 0, width, height, GRAPHICS_RGBA32(0,0,0,0x00));
-      // blue, at the top (y=40)
-      graphics_resource_fill(img, 0, 40, width, 1, GRAPHICS_RGBA32(0,0,0xff,0xff));
-
-      // green, at the bottom (y=height-40)
-      graphics_resource_fill(img, 0, height-40, width, 1, GRAPHICS_RGBA32(0,0xff,0,0xff));
-
-      // draw the subtitle text
-      render_subtitle(img, text, 0, text_size,  y_offset);
-      graphics_update_displayed_resource(img, 0, 0, 0, 0);
-      text_size += 1;
-      if (text_size > 50)
-         text_size = 10;
-   }
-
-   graphics_display_resource(img, 0, LAYER, 0, 0, GRAPHICS_RESOURCE_WIDTH, GRAPHICS_RESOURCE_HEIGHT, VC_DISPMAN_ROT0, 0);
-   graphics_delete_resource(img);
-
+  /* Destroy the font object. */
+  ftglDestroyFont(font);
    return 0;
 }
 
