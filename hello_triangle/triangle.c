@@ -557,8 +557,6 @@ static void exit_func(void)
 
 // global variables declarations
 
-
-
 static drmModeConnector *find_connector (drmModeRes *resources) {
 
 for (i=0; i<resources->count_connectors; i++) {
@@ -603,7 +601,12 @@ return -1;
 
 int main () {
 
-device = open ("/dev/dri/card1", O_RDWR);
+device = open ("/dev/dri/card0", O_RDWR);
+if ((resources = drmModeGetResources(device)) == NULL) // if we have the right device we can get it's resources
+        {
+        printf("/dev/dri/card0 does not have DRM resources, using card1, ");
+        device = open("/dev/dri/card1", O_RDWR | O_CLOEXEC); // if not, try the other one: (1)
+        }
 resources = drmModeGetResources (device);
 connector = find_connector (resources);
 connector_id = connector->connector_id;
@@ -662,27 +665,3 @@ gbm_device_destroy (gbm_device);
 close (device);
 return 0;
 }
-int old_main ()
-{
-
-   // Clear application state
-   memset( state, 0, sizeof( *state ) );
-      
-   // Start OGLES
-   init_ogl(state);
-
-   // Setup the model world
-   init_model_proj(state);
-
-   // initialise the OGLES texture(s)
-   init_textures(state);
-
-   while (!terminate)
-   {
-      update_model(state);
-      redraw_scene(state);
-   }
-   exit_func();
-   return 0;
-}
-

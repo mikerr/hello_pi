@@ -482,7 +482,12 @@ return -1;
 
 int init_gl () {
 
-device = open ("/dev/dri/card1", O_RDWR);
+device = open ("/dev/dri/card0", O_RDWR);
+if ((resources = drmModeGetResources(device)) == NULL) // if we have the right device we can get it's resources
+        {
+        printf("/dev/dri/card0 does not have DRM resources, using card1, ");
+        device = open("/dev/dri/card1", O_RDWR | O_CLOEXEC); // if not, try the other one: (1)
+        }
 resources = drmModeGetResources (device);
 connector = find_connector (resources);
 connector_id = connector->connector_id;
